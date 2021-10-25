@@ -3,12 +3,30 @@ use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
     TokenizerResult,
 };
+use rocket::serde::ser::SerializeSeq;
+use rocket::serde::{Serialize, Serializer};
+use schemars::JsonSchema;
 use url::Url;
 
-#[derive(Clone, Default, Debug, Eq, PartialEq)]
+#[derive(Clone, Default, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub struct PageInfo {
+    #[serde(serialize_with = "serialize_vec_url")]
+    #[schemars(with = "Vec<String>")]
     internal_links: Vec<Url>,
+    #[serde(serialize_with = "serialize_vec_url")]
+    #[schemars(with = "Vec<String>")]
     external_links: Vec<Url>,
+}
+
+fn serialize_vec_url<S>(data: &Vec<Url>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut seq = serializer.serialize_seq(Some(data.len()))?;
+    for url in data {
+        seq.serialize_element(url.as_str())?;
+    }
+    seq.end()
 }
 
 struct PageInfoSink<'a> {
