@@ -93,19 +93,28 @@ mod tests {
     use url::Url;
 
     #[derive(Default, Debug)]
-    struct PageInfoMatcher<'a> {
-        external_links: Vec<&'a str>,
-        internal_links: Vec<&'a str>,
+    struct PageInfoBuilder {
+        info: PageInfo,
     }
 
-    fn eq_link_list(a: &Vec<&str>, b: &Vec<Url>) -> bool {
-        a.iter().eq_by(b, |ai, bi| &Url::parse(ai).unwrap() == bi)
+    fn build_links<const N: usize>(existing: &mut Vec<Url>, new: [&str; N]) {
+        existing.extend(new.iter().map(|a| Url::parse(a).unwrap()));
     }
 
-    impl<'a> PartialEq<PageInfoMatcher<'a>> for PageInfo {
-        fn eq(&self, other: &PageInfoMatcher<'a>) -> bool {
-            eq_link_list(&other.internal_links, &self.internal_links)
-                && eq_link_list(&other.external_links, &self.external_links)
+    impl PageInfoBuilder {
+        fn new() -> Self {
+            PageInfoBuilder::default()
+        }
+        fn build(self) -> PageInfo {
+            self.info
+        }
+        fn external_links<const N: usize>(mut self, urls: [&str; N]) -> Self {
+            build_links(&mut self.info.external_links, urls);
+            self
+        }
+        fn internal_links<const N: usize>(mut self, urls: [&str; N]) -> Self {
+            build_links(&mut self.info.internal_links, urls);
+            self
         }
     }
 
@@ -146,10 +155,9 @@ mod tests {
 
         assert_eq!(
             rv,
-            PageInfoMatcher {
-                internal_links: vec!["https://example.com/another"],
-                ..PageInfoMatcher::default()
-            }
+            PageInfoBuilder::new()
+                .internal_links(["https://example.com/another"])
+                .build()
         )
     }
 
@@ -175,10 +183,9 @@ mod tests {
 
         assert_eq!(
             rv,
-            PageInfoMatcher {
-                internal_links: vec!["https://example.com/another"],
-                ..PageInfoMatcher::default()
-            }
+            PageInfoBuilder::new()
+                .internal_links(["https://example.com/another"])
+                .build()
         )
     }
 
@@ -198,10 +205,9 @@ mod tests {
 
         assert_eq!(
             rv,
-            PageInfoMatcher {
-                external_links: vec!["https://notexample.com/another"],
-                ..PageInfoMatcher::default()
-            }
+            PageInfoBuilder::new()
+                .external_links(["https://notexample.com/another"])
+                .build()
         )
     }
 
@@ -221,10 +227,9 @@ mod tests {
 
         assert_eq!(
             rv,
-            PageInfoMatcher {
-                internal_links: vec!["https://example.com/another"],
-                ..PageInfoMatcher::default()
-            }
+            PageInfoBuilder::new()
+                .internal_links(["https://example.com/another"])
+                .build()
         )
     }
 }
