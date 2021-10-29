@@ -6,6 +6,7 @@ use html5ever::tokenizer::{
 use rocket::serde::ser::SerializeSeq;
 use rocket::serde::{Serialize, Serializer};
 use schemars::JsonSchema;
+use slog_scope::info;
 use url::Url;
 
 #[derive(Clone, Default, Debug, Eq, PartialEq, Serialize, JsonSchema)]
@@ -58,8 +59,7 @@ impl<'a> TokenSink for PageInfoSink<'a> {
         match token {
             Token::TagToken(tag) if tag.kind == TagKind::StartTag && &tag.name == "a" => {
                 if let Err(e) = self.process_anchor(tag) {
-                    // TODO: Logging
-                    println!("No url for anchor: {}", e);
+                    info!("No url for anchor: {}", e);
                 }
             }
             _ => {}

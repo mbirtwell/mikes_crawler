@@ -5,6 +5,7 @@ use rocket::http::Status;
 use rocket::serde::ser::SerializeMap;
 use rocket::serde::{Serialize, Serializer};
 use schemars::JsonSchema;
+use slog_scope::info;
 use url::Url;
 
 use crate::http_client::{HttpClient, HttpResponse};
@@ -87,10 +88,19 @@ impl Crawler for ProdCrawler {
         let mut result = CrawlResult::default();
         match self.client.get(seed.clone()).await {
             Ok(HttpResponse::Ok(body)) => {
+                info!(
+                    "Got body to process from {} containing {} chars",
+                    seed,
+                    body.len()
+                );
                 let page_info = parse_page(&seed, &body);
                 result.pages.insert(seed, PageResult::Crawled(page_info));
             }
             Ok(HttpResponse::ServerFailure(status, msg)) => {
+                info!(
+                    "Got response with status {}: Not processing the body",
+                    status
+                );
                 result
                     .pages
                     .insert(seed, PageResult::ServerFailure(status, msg));
@@ -99,6 +109,7 @@ impl Crawler for ProdCrawler {
                 todo!()
             }
             Err(msg) => {
+                info!("Error trying to make request or process response: {}", msg);
                 result
                     .pages
                     .insert(seed, PageResult::Error(msg.to_string()));
