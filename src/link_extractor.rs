@@ -12,10 +12,10 @@ use url::Url;
 pub struct PageInfo {
     #[serde(serialize_with = "serialize_vec_url")]
     #[schemars(with = "Vec<String>")]
-    internal_links: Vec<Url>,
+    pub internal_links: Vec<Url>,
     #[serde(serialize_with = "serialize_vec_url")]
     #[schemars(with = "Vec<String>")]
-    external_links: Vec<Url>,
+    pub external_links: Vec<Url>,
 }
 
 fn serialize_vec_url<S>(data: &Vec<Url>, serializer: S) -> Result<S::Ok, S::Error>
@@ -88,35 +88,11 @@ pub fn parse_page(url: &Url, page: &str) -> PageInfo {
 
 #[cfg(test)]
 mod tests {
-    use crate::link_extractor::{parse_page, PageInfo};
     use indoc::indoc;
     use url::Url;
 
-    #[derive(Default, Debug)]
-    struct PageInfoBuilder {
-        info: PageInfo,
-    }
-
-    fn build_links<const N: usize>(existing: &mut Vec<Url>, new: [&str; N]) {
-        existing.extend(new.iter().map(|a| Url::parse(a).unwrap()));
-    }
-
-    impl PageInfoBuilder {
-        fn new() -> Self {
-            PageInfoBuilder::default()
-        }
-        fn build(self) -> PageInfo {
-            self.info
-        }
-        fn external_links<const N: usize>(mut self, urls: [&str; N]) -> Self {
-            build_links(&mut self.info.external_links, urls);
-            self
-        }
-        fn internal_links<const N: usize>(mut self, urls: [&str; N]) -> Self {
-            build_links(&mut self.info.internal_links, urls);
-            self
-        }
-    }
+    use crate::link_extractor::{parse_page, PageInfo};
+    use crate::test_util::PageInfoBuilder;
 
     fn run_parse_successfully(html: &str) -> PageInfo {
         parse_page(&Url::parse("https://example.com/start").unwrap(), html)
