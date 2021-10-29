@@ -227,7 +227,7 @@ mod tests {
                 <body>
                     <a href="https://notexample.com/another">Interesting</a>
                 </body>
-            </html
+            </html>
         "##};
         dummy_client.add_page(seed, html);
 
