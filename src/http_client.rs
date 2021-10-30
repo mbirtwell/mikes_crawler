@@ -38,7 +38,7 @@ impl ProdHttpClient {
 #[async_trait]
 impl HttpClient for ProdHttpClient {
     async fn get(&self, url: Url) -> Result<HttpResponse, anyhow::Error> {
-        let response = self.client.get(url).send().await?;
+        let response = self.client.get(url.clone()).send().await?;
         if response.status().is_success() {
             Ok(HttpResponse::Ok(response.text().await?))
         } else if response.status().is_redirection() {
@@ -46,7 +46,7 @@ impl HttpClient for ProdHttpClient {
                 .headers()
                 .get("Location")
                 .ok_or(anyhow!("No Location header on redirect"))?;
-            let location = Url::parse(location.to_str()?)?;
+            let location = url.join(location.to_str()?)?;
             Ok(HttpResponse::Redirect(
                 Status::new(response.status().as_u16()),
                 location,
