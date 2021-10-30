@@ -85,34 +85,40 @@ impl ProdCrawler {
 #[async_trait]
 impl Crawler for ProdCrawler {
     async fn crawl(&self, seed: Url) -> CrawlResult {
+        let mut todo = vec![seed];
         let mut result = CrawlResult::default();
-        match self.client.get(seed.clone()).await {
-            Ok(HttpResponse::Ok(body)) => {
-                info!(
-                    "Got body to process from {} containing {} chars",
-                    seed,
-                    body.len()
-                );
-                let page_info = parse_page(&seed, &body);
-                result.pages.insert(seed, PageResult::Crawled(page_info));
-            }
-            Ok(HttpResponse::ServerFailure(status, msg)) => {
-                info!(
-                    "Got response with status {}: Not processing the body",
-                    status
-                );
-                result
-                    .pages
-                    .insert(seed, PageResult::ServerFailure(status, msg));
-            }
-            Ok(HttpResponse::Redirect(_status, _url)) => {
-                todo!()
-            }
-            Err(msg) => {
-                info!("Error trying to make request or process response: {}", msg);
-                result
-                    .pages
-                    .insert(seed, PageResult::Error(msg.to_string()));
+        while let Some(url) = todo.pop() {
+            match self.client.get(url.clone()).await {
+                Ok(HttpResponse::Ok(body)) => {
+                    info!(
+                        "Got body to process from {} containing {} chars",
+                        url,
+                        body.len()
+                    );
+                    let page_info = parse_page(&url, &body);
+                    todo.extend(page_info.internal_links.iter().cloned());
+                    result.pages.insert(url, PageResult::Crawled(page_info));
+                }
+                Ok(HttpResponse::ServerFailure(status, msg)) => {
+                    info!(
+                        "Got response with status {}: Not processing the body",
+                        status
+                    );
+                    result
+                        .pages
+                        .insert(url, PageResult::ServerFailure(status, msg));
+                }
+                Ok(HttpResponse::Redirect(status, target)) => {
+                    info!("Got redirect from {} to {}", url, target);
+                    result
+                        .pages
+                        .insert(url, PageResult::Redirect(status, target.clone()));
+                    todo.push(target);
+                }
+                Err(msg) => {
+                    info!("Error trying to make request or process response: {}", msg);
+                    result.pages.insert(url, PageResult::Error(msg.to_string()));
+                }
             }
         }
         result
@@ -132,6 +138,7 @@ mod tests {
 
     use crate::crawler::{CrawlResult, Crawler, PageResult, ProdCrawler};
     use crate::http_client::{HttpClient, HttpResponse};
+    use crate::link_extractor::PageInfo;
     use crate::test_util::PageInfoBuilder;
 
     fn crawl_result<const N: usize>(pages: [(&str, PageResult); N]) -> CrawlResult {
@@ -159,6 +166,12 @@ mod tests {
             self.responses.insert(
                 Url::parse(url).unwrap(),
                 Box::new(move || Err(anyhow!(msg))),
+            );
+        }
+        pub fn add_redirect(&mut self, url: &str, status: Status, target: &'static str) {
+            self.responses.insert(
+                Url::parse(url).unwrap(),
+                Box::new(move || Ok(HttpResponse::Redirect(status, Url::parse(target).unwrap()))),
             );
         }
         pub fn add_page(&mut self, url: &str, body: &'static str) {
@@ -243,6 +256,122 @@ mod tests {
                         .build()
                 )
             )])
+        )
+    }
+
+    #[tokio::test]
+    async fn reports_redirect_and_target() {
+        let mut dummy_client = DummyHttpClient::default();
+        let redirect = "https://example.com/redirect";
+        let target = "https://example.com/target";
+        let html = indoc! {r##"
+            <!DOCTYPE html>
+            <html>
+                <head></head>
+                <body>
+                    <a href="https://notexample.com/another">Interesting</a>
+                </body>
+            </html>
+        "##};
+        dummy_client.add_redirect(redirect, Status::Found, target);
+        dummy_client.add_page(target, html);
+
+        let result = do_crawl(dummy_client, redirect).await;
+
+        assert_eq!(
+            result,
+            crawl_result([
+                (
+                    redirect,
+                    PageResult::Redirect(Status::Found, Url::parse(target).unwrap())
+                ),
+                (
+                    target,
+                    PageResult::Crawled(
+                        PageInfoBuilder::new()
+                            .external_links(["https://notexample.com/another"])
+                            .build()
+                    )
+                )
+            ])
+        )
+    }
+
+    #[tokio::test]
+    async fn follows_multiple_internal_links() {
+        let mut dummy_client = DummyHttpClient::default();
+        let seed = "https://example.com/start";
+        let link1 = "https://example.com/link1";
+        let link2 = "https://example.com/link2";
+        let html = indoc! {r##"
+            <!DOCTYPE html>
+            <html>
+                <head></head>
+                <body>
+                    <a href="https://example.com/link1">Interesting</a>
+                    <a href="https://example.com/link2">Interesting</a>
+                </body>
+            </html>
+        "##};
+        dummy_client.add_page(seed, html);
+        dummy_client.add_page(link1, "");
+        dummy_client.add_page(link2, "");
+
+        let result = do_crawl(dummy_client, seed).await;
+
+        assert_eq!(
+            result,
+            crawl_result([
+                (
+                    seed,
+                    PageResult::Crawled(
+                        PageInfoBuilder::new()
+                            .internal_links([link1, link2])
+                            .build()
+                    )
+                ),
+                (link1, PageResult::Crawled(PageInfo::default()),),
+                (link2, PageResult::Crawled(PageInfo::default()),)
+            ])
+        )
+    }
+
+    #[tokio::test]
+    fn stop_after_loop_of_pages() {
+        let mut dummy_client = DummyHttpClient::default();
+        let seed = "https://example.com/start";
+        let link1 = "https://example.com/link1";
+        let link2 = "https://example.com/link2";
+        let html = indoc! {r##"
+            <!DOCTYPE html>
+            <html>
+                <head></head>
+                <body>
+                    <a href="https://example.com/link1">Interesting</a>
+                    <a href="https://example.com/link2">Interesting</a>
+                </body>
+            </html>
+        "##};
+        dummy_client.add_page(seed, html);
+        dummy_client.add_page(link1, "");
+        dummy_client.add_page(link2, "");
+
+        let result = do_crawl(dummy_client, seed).await;
+
+        assert_eq!(
+            result,
+            crawl_result([
+                (
+                    seed,
+                    PageResult::Crawled(
+                        PageInfoBuilder::new()
+                            .internal_links([link1, link2])
+                            .build()
+                    )
+                ),
+                (link1, PageResult::Crawled(PageInfo::default()),),
+                (link2, PageResult::Crawled(PageInfo::default()),)
+            ])
         )
     }
 }
