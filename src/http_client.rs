@@ -1,10 +1,13 @@
-use anyhow::anyhow;
+use anyhow::{anyhow, Error};
 use rocket::http::Status;
 use url::Url;
 
 use reqwest::header::CONTENT_TYPE;
 use reqwest::redirect::Policy;
+use reqwest::StatusCode;
 use rocket::async_trait;
+
+pub const USER_AGENT: &str = "MikesCrawler";
 
 #[derive(Clone)]
 pub enum HttpResponse {
@@ -17,6 +20,7 @@ pub enum HttpResponse {
 #[async_trait]
 pub trait HttpClient: Sync + Send {
     async fn get(&self, url: Url) -> Result<HttpResponse, anyhow::Error>;
+    async fn get_robots(&self, url: Url) -> Result<Option<String>, anyhow::Error>;
     fn clone(&self) -> Box<dyn HttpClient>;
 }
 
@@ -29,7 +33,7 @@ impl ProdHttpClient {
     pub fn new() -> Self {
         ProdHttpClient {
             client: reqwest::ClientBuilder::new()
-                .user_agent("MikesCrawler")
+                .user_agent(USER_AGENT)
                 .redirect(Policy::none())
                 .build()
                 // No point trying to handle this error, we can't do anything
@@ -69,6 +73,17 @@ impl HttpClient for ProdHttpClient {
                 Status::new(response.status().as_u16()),
                 response.text().await?,
             ))
+        }
+    }
+
+    async fn get_robots(&self, url: Url) -> Result<Option<String>, Error> {
+        let response = self.client.get(url.clone()).send().await?;
+        if response.status().is_success() {
+            Ok(Some(response.text().await?))
+        } else if response.status() == StatusCode::NOT_FOUND {
+            Ok(None)
+        } else {
+            anyhow::bail!("Got status {} for robots.txt", response.status())
         }
     }
 

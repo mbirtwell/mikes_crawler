@@ -115,6 +115,87 @@ fn ignore_non_html() {
     ms.assert();
 }
 
+#[test]
+fn ignores_things_excluded_by_robots() {
+    setup();
+
+    let mock_server = MockServer::start();
+    let mstart = mock_server.mock(|when, then| {
+        when.path("/start");
+        then.status(200)
+            .header("Content-Type", "text/html")
+            .body(format!(
+                indoc! {r#"
+                    <!DOCTYPE html>
+                    <html>
+                        <head></head>
+                        <body>
+                            <a href="https://notexample.com/another">Interesting</a>
+                            <a href="{}">Interesting</a>
+                        </body>
+                    </html>
+                "#},
+                mock_server.url("/disallowed"),
+            ));
+    });
+    let mrobots = mock_server.mock(|when, then| {
+        when.path("/robots.txt");
+        then.status(200)
+            .header("Content-Type", "text/plain")
+            .body(indoc! {r#"
+                User-agent: *
+                Disallow: /disallowed
+            "#});
+    });
+    let mdisallowed = mock_server.mock(|when, then| {
+        when.path("/disallowed");
+        then.status(200)
+            .header("Content-Type", "text/html; charset=utf-8")
+            .body(format!(
+                indoc! {r#"
+                    <!DOCTYPE html>
+                    <html>
+                        <head></head>
+                        <body>
+                            <a href="{}">Interesting</a>
+                        </body>
+                    </html>
+                "#},
+                mock_server.url("/hidden")
+            ));
+    });
+    let mhidden = mock_server.mock(|when, then| {
+        when.path("/hidden");
+        then.status(200)
+            .header("Content-Type", "text/html; charset=utf-8")
+            .body("");
+    });
+
+    let start = mock_server.url("/start");
+
+    let response = reqwest::blocking::get(format!(
+        "http://127.0.0.1:{}/crawl/{}",
+        rocket::Config::default().port,
+        urlencoding::encode(&start)
+    ))
+    .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let body: Value = response.json().unwrap();
+    println!("{:?}", body);
+
+    assert_eq!(
+        body["pages"][mock_server.url("/disallowed")]
+            .as_str()
+            .unwrap(),
+        "ExcludedByRobotsTxt"
+    );
+
+    mrobots.assert_hits(1);
+    mdisallowed.assert_hits(0);
+    mhidden.assert_hits(0)
+}
+
 fn str_array(v: &Value) -> Vec<&str> {
     v.as_array()
         .unwrap()

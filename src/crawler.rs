@@ -14,7 +14,7 @@ use slog_scope::info;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use url::Url;
 
-use crate::http_client::{HttpClient, HttpResponse};
+use crate::http_client::{HttpClient, HttpResponse, USER_AGENT};
 use crate::link_extractor::{parse_page, PageInfo};
 
 #[derive(Debug, PartialEq, Serialize, JsonSchema)]
@@ -37,6 +37,7 @@ enum PageResult {
     ),
     Crawled(PageInfo),
     OtherContent(String),
+    ExcludedByRobotsTxt,
 }
 
 fn serialize_status<S>(data: &Status, serializer: S) -> Result<S::Ok, S::Error>
@@ -93,23 +94,42 @@ struct Crawl {
     seen: HashSet<Url>,
     todo: UnboundedSender<Url>,
     result: CrawlResult,
+    robots: Option<String>,
 }
 
 impl Crawl {
-    fn new() -> (UnboundedReceiver<Url>, Arc<Mutex<Self>>) {
+    fn new(robots: Option<String>) -> (UnboundedReceiver<Url>, Arc<Mutex<Self>>) {
         let (todo, done) = unbounded_channel();
         let this = Crawl {
             seen: Default::default(),
             todo,
             result: Default::default(),
+            robots,
         };
         (done, Arc::new(Mutex::new(this)))
+    }
+
+    fn allowed_by_robots(&self, url: &Url) -> bool {
+        self.robots
+            .as_ref()
+            .map(|robots| {
+                let mut matcher = robotstxt::DefaultMatcher::default();
+                matcher.one_agent_allowed_by_robots(&*robots, USER_AGENT, url.as_str())
+            })
+            .unwrap_or(true)
     }
 
     fn add_link(&mut self, found: &Url) -> anyhow::Result<()> {
         if !self.seen.contains(found) {
             self.seen.insert(found.clone());
-            self.todo.send(found.clone())?;
+
+            if self.allowed_by_robots(found) {
+                self.todo.send(found.clone())?;
+            } else {
+                self.result
+                    .pages
+                    .insert(found.clone(), PageResult::ExcludedByRobotsTxt);
+            }
         }
         Ok(())
     }
@@ -194,7 +214,8 @@ async fn step(
 #[async_trait]
 impl Crawler for ProdCrawler {
     async fn crawl(&self, seed: Url) -> anyhow::Result<CrawlResult> {
-        let (rx, crawl) = Crawl::new();
+        let robots = self.client.get_robots(seed.join("/robots.txt")?).await?;
+        let (rx, crawl) = Crawl::new(robots);
         lock_map_err(&crawl)?.add_link(&seed)?;
         {
             let crawl2 = crawl.clone();
@@ -223,7 +244,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::Once;
 
-    use anyhow::anyhow;
+    use anyhow::{anyhow, Error};
     use indoc::indoc;
     use rocket::async_trait;
     use rocket::http::Status;
@@ -272,6 +293,7 @@ mod tests {
         // store it in the map, instead we store a closure to build it when we
         // need it.
         responses: Arc<Mutex<HashMap<Url, DummyResponse>>>,
+        robots: Option<String>,
     }
 
     impl DummyHttpClient {
@@ -317,12 +339,12 @@ mod tests {
             );
         }
 
-        pub fn get_hit_counts(&self) -> HashMap<Url, u32> {
+        pub fn get_hit_counts(&self) -> HashMap<String, u32> {
             self.responses
                 .lock()
                 .unwrap()
                 .iter()
-                .map(|(url, data)| (url.clone(), data.hit_count))
+                .map(|(url, data)| (url.clone().to_string(), data.hit_count))
                 .collect()
         }
     }
@@ -336,6 +358,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("No response available for url {}", url));
             response.hit_count += 1;
             (response.respond)()
+        }
+
+        async fn get_robots(&self, _url: Url) -> Result<Option<String>, Error> {
+            Ok(self.robots.clone())
         }
 
         fn clone(&self) -> Box<dyn HttpClient> {
@@ -660,5 +686,33 @@ mod tests {
             result,
             crawl_result([(pdf, PageResult::OtherContent(content_type.to_string())),])
         );
+    }
+
+    #[tokio::test]
+    async fn ignores_link_to_page_excluded_by_robots_txt() {
+        setup();
+        let mut dummy_client = DummyHttpClient::default();
+        let page = "https://example.com/page";
+        let excluded = "https://example.com/excluded";
+        dummy_client.robots = Some(
+            indoc! { r#"
+                User-agent: *
+                Disallow: /excluded
+            "#}
+            .to_string(),
+        );
+        dummy_client.add_page(page, html_with_links([excluded]));
+        dummy_client.add_page(excluded, "");
+
+        let result = do_crawl(&dummy_client, page).await;
+
+        assert_eq!(
+            result,
+            crawl_result([
+                (page, crawled_internal([excluded])),
+                (excluded, PageResult::ExcludedByRobotsTxt)
+            ])
+        );
+        assert_eq!(dummy_client.get_hit_counts()[excluded], 0);
     }
 }
