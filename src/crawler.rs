@@ -139,7 +139,9 @@ async fn step(
             let page_info = spawn_blocking(move || parse_page(&url2, &body)).await??;
             let mut crawl = lock_map_err(&crawl)?;
             for found in page_info.internal_links.iter() {
-                crawl.add_link(found)?
+                let mut found = found.clone();
+                found.set_fragment(None);
+                crawl.add_link(&found)?
             }
             crawl
                 .result
@@ -600,6 +602,30 @@ mod tests {
                 .into_values()
                 .collect::<Vec<_>>(),
             vec![1, 1, 1]
+        )
+    }
+
+    #[tokio::test]
+    async fn dont_visit_fragments_separately() {
+        setup();
+        let mut dummy_client = DummyHttpClient::default();
+        let page = "https://example.com/page";
+        let link1 = format!("{}#link1", page);
+        let link2 = format!("{}#link2", page);
+        dummy_client.add_page(page, html_with_links([&link1, &link2]));
+
+        let result = do_crawl(&dummy_client, page).await;
+
+        assert_eq!(
+            result,
+            crawl_result([(page, crawled_internal([&link1, &link2])),])
+        );
+        assert_eq!(
+            dummy_client
+                .get_hit_counts()
+                .into_values()
+                .collect::<Vec<_>>(),
+            vec![1]
         )
     }
 }
