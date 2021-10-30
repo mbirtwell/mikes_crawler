@@ -1,11 +1,17 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, MutexGuard};
 
+use anyhow::anyhow;
 use rocket::async_trait;
+use rocket::futures::{StreamExt, TryStreamExt};
 use rocket::http::Status;
 use rocket::serde::ser::SerializeMap;
 use rocket::serde::{Serialize, Serializer};
+use rocket::tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use rocket::tokio::task::spawn_blocking;
 use schemars::JsonSchema;
 use slog_scope::info;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use url::Url;
 
 use crate::http_client::{HttpClient, HttpResponse};
@@ -69,7 +75,7 @@ where
 
 #[async_trait]
 pub trait Crawler {
-    async fn crawl(&self, seed: Url) -> CrawlResult;
+    async fn crawl(&self, seed: Url) -> anyhow::Result<CrawlResult>;
 }
 
 pub struct ProdCrawler {
@@ -82,62 +88,129 @@ impl ProdCrawler {
     }
 }
 
+struct Crawl {
+    seen: HashSet<Url>,
+    todo: UnboundedSender<Url>,
+    result: CrawlResult,
+}
+
+impl Crawl {
+    fn new() -> (UnboundedReceiver<Url>, Arc<Mutex<Self>>) {
+        let (todo, done) = unbounded_channel();
+        let this = Crawl {
+            seen: Default::default(),
+            todo,
+            result: Default::default(),
+        };
+        (done, Arc::new(Mutex::new(this)))
+    }
+
+    fn add_link(&mut self, found: &Url) -> anyhow::Result<()> {
+        if !self.seen.contains(found) {
+            self.seen.insert(found.clone());
+            self.todo.send(found.clone())?;
+        }
+        Ok(())
+    }
+}
+
+/// std::sync::Mutex is fine to use inside Tokio the docs even recommend it if
+/// you don't want to hold locks across await. We actively don't want to hold
+/// locks across await. So that's fine. But the PoisonError isn't Send so we
+/// convert that in to a generic error early so that we don't have to worry a
+/// about it.
+fn lock_map_err<T>(lock: &Arc<Mutex<T>>) -> anyhow::Result<MutexGuard<'_, T>> {
+    lock.lock().map_err(|e| anyhow!(e.to_string()))
+}
+
+async fn step(
+    crawl: Arc<Mutex<Crawl>>,
+    client: Box<dyn HttpClient>,
+    url: Url,
+) -> anyhow::Result<()> {
+    match client.get(url.clone()).await {
+        Ok(HttpResponse::Ok(body)) => {
+            info!(
+                "Got body to process from {} containing {} chars",
+                url,
+                body.len()
+            );
+            let url2 = url.clone();
+            let page_info = spawn_blocking(move || parse_page(&url2, &body)).await?;
+            let mut crawl = lock_map_err(&crawl)?;
+            for found in page_info.internal_links.iter() {
+                crawl.add_link(found)?
+            }
+            crawl
+                .result
+                .pages
+                .insert(url, PageResult::Crawled(page_info));
+        }
+        Ok(HttpResponse::ServerFailure(status, msg)) => {
+            info!(
+                "Got response with status {}: Not processing the body",
+                status
+            );
+            let mut crawl = lock_map_err(&crawl)?;
+            crawl
+                .result
+                .pages
+                .insert(url, PageResult::ServerFailure(status, msg));
+        }
+        Ok(HttpResponse::Redirect(status, target)) => {
+            info!("Got redirect from {} to {}", url, target);
+            let mut crawl = lock_map_err(&crawl)?;
+            if target.domain() == url.domain() {
+                crawl.add_link(&target)?
+            }
+            crawl
+                .result
+                .pages
+                .insert(url, PageResult::Redirect(status, target.clone()));
+        }
+        Err(msg) => {
+            info!("Error trying to make request or process response: {}", msg);
+            let mut crawl = lock_map_err(&crawl)?;
+            crawl
+                .result
+                .pages
+                .insert(url, PageResult::Error(msg.to_string()));
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Crawler for ProdCrawler {
-    async fn crawl(&self, seed: Url) -> CrawlResult {
-        let mut seen = HashSet::new();
-        seen.insert(seed.clone());
-        let mut todo = vec![seed];
-        let mut result = CrawlResult::default();
-        while let Some(url) = todo.pop() {
-            match self.client.get(url.clone()).await {
-                Ok(HttpResponse::Ok(body)) => {
-                    info!(
-                        "Got body to process from {} containing {} chars",
-                        url,
-                        body.len()
-                    );
-                    let page_info = parse_page(&url, &body);
-                    for found in page_info.internal_links.iter() {
-                        if !seen.contains(found) {
-                            seen.insert(found.clone());
-                            todo.push(found.clone());
-                        }
-                    }
-                    result.pages.insert(url, PageResult::Crawled(page_info));
-                }
-                Ok(HttpResponse::ServerFailure(status, msg)) => {
-                    info!(
-                        "Got response with status {}: Not processing the body",
-                        status
-                    );
-                    result
-                        .pages
-                        .insert(url, PageResult::ServerFailure(status, msg));
-                }
-                Ok(HttpResponse::Redirect(status, target)) => {
-                    info!("Got redirect from {} to {}", url, target);
-                    if target.domain() == url.domain() && !seen.contains(&target) {
-                        seen.insert(target.clone());
-                        todo.push(target.clone());
-                    }
-                    result
-                        .pages
-                        .insert(url, PageResult::Redirect(status, target.clone()));
-                }
-                Err(msg) => {
-                    info!("Error trying to make request or process response: {}", msg);
-                    result.pages.insert(url, PageResult::Error(msg.to_string()));
+    async fn crawl(&self, seed: Url) -> anyhow::Result<CrawlResult> {
+        let (rx, crawl) = Crawl::new();
+        lock_map_err(&crawl)?.add_link(&seed)?;
+        {
+            let crawl2 = crawl.clone();
+            let mut stream = UnboundedReceiverStream::new(rx)
+                .map(|url| step(crawl2.clone(), self.client.clone(), url))
+                .buffer_unordered(20);
+            while let Some(()) = stream.try_next().await? {
+                let crawl = lock_map_err(&crawl)?;
+                if crawl.result.pages.len() == crawl.seen.len() {
+                    break;
                 }
             }
         }
-        result
+
+        Ok(Arc::try_unwrap(crawl)
+            .map_err(|_| anyhow!("Extra references to crawl still remain"))?
+            .into_inner()?
+            .result)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::Once;
 
     use anyhow::anyhow;
     use indoc::indoc;
@@ -151,8 +224,14 @@ mod tests {
     use crate::link_extractor::PageInfo;
     use crate::setup_logging;
     use crate::test_util::PageInfoBuilder;
-    use std::sync::Arc;
-    use std::sync::Mutex;
+
+    static INIT: Once = Once::new();
+
+    fn setup() {
+        INIT.call_once(|| {
+            Box::leak(Box::new(setup_logging()));
+        })
+    }
 
     fn crawl_result<const N: usize>(pages: [(&str, PageResult); N]) -> CrawlResult {
         CrawlResult {
@@ -239,12 +318,16 @@ mod tests {
             response.hit_count += 1;
             (response.respond)()
         }
+
+        fn clone(&self) -> Box<dyn HttpClient> {
+            Box::new(Clone::clone(self))
+        }
     }
 
     async fn do_crawl(dummy_client: &DummyHttpClient, seed: &str) -> CrawlResult {
-        let crawler = ProdCrawler::new(Box::new(dummy_client.clone()));
+        let crawler = ProdCrawler::new(HttpClient::clone(dummy_client));
 
-        crawler.crawl(Url::parse(seed).unwrap()).await
+        crawler.crawl(Url::parse(seed).unwrap()).await.unwrap()
     }
 
     fn html_with_links<const N: usize>(links: [&str; N]) -> String {
@@ -272,6 +355,7 @@ mod tests {
 
     #[tokio::test]
     async fn reports_single_server_error() {
+        setup();
         let mut dummy_client = DummyHttpClient::default();
         let status = Status::InternalServerError;
         let msg = "Internal server error";
@@ -288,6 +372,7 @@ mod tests {
 
     #[tokio::test]
     async fn reports_single_network_error() {
+        setup();
         let mut dummy_client = DummyHttpClient::default();
         let msg = "Connection failed";
         let seed = "https://example.com/start";
@@ -303,6 +388,7 @@ mod tests {
 
     #[tokio::test]
     async fn reports_single_page_with_external_links() {
+        setup();
         let mut dummy_client = DummyHttpClient::default();
         let seed = "https://example.com/start";
         let external_link = "https://notexample.com/another";
@@ -326,6 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn reports_redirect_and_target() {
+        setup();
         let mut dummy_client = DummyHttpClient::default();
         let redirect = "https://example.com/redirect";
         let target = "https://example.com/target";
@@ -357,6 +444,7 @@ mod tests {
 
     #[tokio::test]
     async fn follows_multiple_internal_links() {
+        setup();
         let mut dummy_client = DummyHttpClient::default();
         let seed = "https://example.com/start";
         let link1 = "https://example.com/link1";
@@ -380,6 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_after_loop_of_pages() {
+        setup();
         let mut dummy_client = DummyHttpClient::default();
         let seed = "https://example.com/start";
         let link1 = "https://example.com/link1";
@@ -403,6 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_after_parallel_loop_of_pages() {
+        setup();
         let mut dummy_client = DummyHttpClient::default();
         let seed = "https://example.com/start";
         let link1 = "https://example.com/link1";
@@ -433,6 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn dont_follow_external_redirects() {
+        setup();
         let mut dummy_client = DummyHttpClient::default();
         let redirect = "https://example.com/redirect";
         let target = "https://notexample.com/target";
@@ -451,6 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn dont_revisit_due_to_redirect() {
+        setup();
         let mut dummy_client = DummyHttpClient::default();
         let seed = "https://example.com/start";
         let redirect = "https://example.com/redirect";
@@ -480,6 +572,7 @@ mod tests {
 
     #[tokio::test]
     async fn dont_revisit_if_found_from_redirect() {
+        setup();
         let mut dummy_client = DummyHttpClient::default();
         let redirect = "https://example.com/redirect";
         let target = "https://example.com/target";

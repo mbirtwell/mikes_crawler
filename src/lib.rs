@@ -34,7 +34,10 @@ async fn crawl(
     logger
         .scope(async move {
             let seed = Url::parse(&seed).map_err(|e| (Status::BadRequest, e.to_string()))?;
-            let result = crawler.crawl(seed).await;
+            let result = crawler
+                .crawl(seed)
+                .await
+                .map_err(|e| (Status::InternalServerError, e.to_string()))?;
             Ok(Json(result))
         })
         .await

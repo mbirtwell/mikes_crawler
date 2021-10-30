@@ -16,8 +16,10 @@ pub enum HttpResponse {
 #[async_trait]
 pub trait HttpClient: Sync + Send {
     async fn get(&self, url: Url) -> Result<HttpResponse, anyhow::Error>;
+    fn clone(&self) -> Box<dyn HttpClient>;
 }
 
+#[derive(Clone)]
 pub struct ProdHttpClient {
     client: reqwest::Client,
 }
@@ -57,5 +59,9 @@ impl HttpClient for ProdHttpClient {
                 response.text().await?,
             ))
         }
+    }
+
+    fn clone(&self) -> Box<dyn HttpClient> {
+        Box::new(Clone::clone(self))
     }
 }
