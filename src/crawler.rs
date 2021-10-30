@@ -36,6 +36,7 @@ enum PageResult {
         Url,
     ),
     Crawled(PageInfo),
+    OtherContent(String),
 }
 
 fn serialize_status<S>(data: &Status, serializer: S) -> Result<S::Ok, S::Error>
@@ -129,7 +130,7 @@ async fn step(
     url: Url,
 ) -> anyhow::Result<()> {
     match client.get(url.clone()).await {
-        Ok(HttpResponse::Ok(body)) => {
+        Ok(HttpResponse::Html(body)) => {
             info!(
                 "Got body to process from {} containing {} chars",
                 url,
@@ -169,6 +170,14 @@ async fn step(
                 .result
                 .pages
                 .insert(url, PageResult::Redirect(status, target.clone()));
+        }
+        Ok(HttpResponse::OtherContent(content_type)) => {
+            info!("Got non html response containing: {}", content_type);
+            let mut crawl = lock_map_err(&crawl)?;
+            crawl
+                .result
+                .pages
+                .insert(url, PageResult::OtherContent(content_type));
         }
         Err(msg) => {
             info!("Error trying to make request or process response: {}", msg);
@@ -296,7 +305,15 @@ mod tests {
             let body: String = body.into();
             self.insert(
                 url,
-                DummyResponse::new(move || Ok(HttpResponse::Ok(body.clone()))),
+                DummyResponse::new(move || Ok(HttpResponse::Html(body.clone()))),
+            );
+        }
+
+        pub fn add_other_content<S: Into<String>>(&mut self, url: &str, content_type: S) {
+            let content_type: String = content_type.into();
+            self.insert(
+                url,
+                DummyResponse::new(move || Ok(HttpResponse::OtherContent(content_type.clone()))),
             );
         }
 
@@ -627,5 +644,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1]
         )
+    }
+
+    #[tokio::test]
+    async fn ignores_non_html() {
+        setup();
+        let mut dummy_client = DummyHttpClient::default();
+        let pdf = "https://example.com/thing.pdf";
+        let content_type = "x-application/pdf";
+        dummy_client.add_other_content(pdf, content_type);
+
+        let result = do_crawl(&dummy_client, pdf).await;
+
+        assert_eq!(
+            result,
+            crawl_result([(pdf, PageResult::OtherContent(content_type.to_string())),])
+        );
     }
 }

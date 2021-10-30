@@ -2,13 +2,14 @@ use anyhow::anyhow;
 use rocket::http::Status;
 use url::Url;
 
+use reqwest::header::CONTENT_TYPE;
 use reqwest::redirect::Policy;
 use rocket::async_trait;
 
 #[derive(Clone)]
 pub enum HttpResponse {
-    Ok(String),
-    #[allow(dead_code)]
+    Html(String),
+    OtherContent(String),
     Redirect(Status, Url),
     ServerFailure(Status, String),
 }
@@ -42,7 +43,17 @@ impl HttpClient for ProdHttpClient {
     async fn get(&self, url: Url) -> Result<HttpResponse, anyhow::Error> {
         let response = self.client.get(url.clone()).send().await?;
         if response.status().is_success() {
-            Ok(HttpResponse::Ok(response.text().await?))
+            let content_type: mime::Mime = response
+                .headers()
+                .get(CONTENT_TYPE)
+                .ok_or_else(|| anyhow!("No content type on OK response"))?
+                .to_str()?
+                .parse()?;
+            if content_type.essence_str() == "text/html" {
+                Ok(HttpResponse::Html(response.text().await?))
+            } else {
+                Ok(HttpResponse::OtherContent(content_type.to_string()))
+            }
         } else if response.status().is_redirection() {
             let location = response
                 .headers()

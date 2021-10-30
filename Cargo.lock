@@ -1262,6 +1262,7 @@ dependencies = [
  "html5ever",
  "httpmock",
  "indoc",
+ "mime",
  "rand 0.8.4",
  "reqwest",
  "rocket",
