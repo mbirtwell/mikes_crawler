@@ -14,9 +14,11 @@ use url::Url;
 pub struct PageInfo {
     #[serde(serialize_with = "serialize_vec_url")]
     #[schemars(with = "Vec<String>")]
+    /// Links found on the page with the same domain as the page
     pub internal_links: Vec<Url>,
     #[serde(serialize_with = "serialize_vec_url")]
     #[schemars(with = "Vec<String>")]
+    /// Links found on the page with different domains to the page
     pub external_links: Vec<Url>,
 }
 

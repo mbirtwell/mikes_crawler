@@ -26,6 +26,9 @@ type CrawlerState = Box<dyn Crawler + Send + Sync>;
 
 #[openapi]
 #[get("/crawl/<seed>")]
+/// Crawl a domain starting with <seed>
+///
+/// Returns information about all the links on every page reachable from seed
 async fn crawl(
     logger: ReqLogger,
     crawler: &State<CrawlerState>,

@@ -19,24 +19,52 @@ use crate::link_extractor::{parse_page, PageInfo};
 
 #[derive(Debug, PartialEq, Serialize, JsonSchema)]
 enum PageResult {
-    ServerFailure(
+    #[schemars(title = "Server failure")]
+    /// The remote server returned something other than success
+    ///
+    /// Seen as we are just crawling urls that the user and server have provided
+    /// us we report all 400/500 codes here
+    ServerFailure {
         #[serde(serialize_with = "serialize_status")]
         #[schemars(with = "u16")]
-        Status,
-        String,
-    ),
+        /// The http status returned by the server
+        status: Status,
+        /// The body of the server response
+        body: String,
+    },
+    #[schemars(title = "Error")]
+    /// There was another error trying to reach this page
+    ///
+    /// This could be network errors, some error whilst processing the http
+    /// response that was returned.
     Error(String),
-    #[allow(dead_code)]
-    Redirect(
+    #[schemars(title = "Redirect")]
+    /// The server returned a redirect.
+    ///
+    /// If the redirect was to the same domain we'll follow it.
+    Redirect {
         #[serde(serialize_with = "serialize_status")]
         #[schemars(with = "u16")]
-        Status,
+        status: Status,
         #[serde(serialize_with = "serialize_url")]
         #[schemars(with = "String")]
-        Url,
-    ),
+        location: Url,
+    },
+    #[schemars(title = "Crawled")]
+    /// The link information for a page
+    ///
+    /// This is the interesting one. This provides information about all the
+    /// links found on the page. The crawler will have continued with all the
+    /// internal_links reported.
     Crawled(PageInfo),
+    #[schemars(title = "Other content")]
+    /// A good response from the server, but not html
+    ///
+    /// Includes the mimetype of the response
     OtherContent(String),
+    #[schemars(title = "Excluded by robots.txt")]
+    /// The server had a robots.txt file that asked robots not to visit this
+    /// url. So we didn't.
     ExcludedByRobotsTxt,
 }
 
@@ -54,10 +82,58 @@ where
     serializer.serialize_str(data.as_str())
 }
 
+fn crawl_result_example() -> CrawlResult {
+    CrawlResult {
+        pages: HashMap::from([
+            (
+                Url::parse("https://example.com/").unwrap(),
+                PageResult::Crawled(PageInfo {
+                    internal_links: vec![
+                        Url::parse("https://example.com/redirect").unwrap(),
+                        Url::parse("https://example.com/failure").unwrap(),
+                    ],
+                    external_links: vec![
+                        Url::parse("https://www.iana.org/domains/example").unwrap()
+                    ],
+                }),
+            ),
+            (
+                Url::parse("https://example.com/redirect").unwrap(),
+                PageResult::Redirect {
+                    status: Status::Found,
+                    location: Url::parse("https://example.com/pdf").unwrap(),
+                },
+            ),
+            (
+                Url::parse("https://example.com/pdf").unwrap(),
+                PageResult::OtherContent("x-application/pdf".to_string()),
+            ),
+            (
+                Url::parse("https://example.com/failure").unwrap(),
+                PageResult::ServerFailure {
+                    status: Status::InternalServerError,
+                    body: "Internal server error".to_string(),
+                },
+            ),
+            (
+                Url::parse("https://example.com/excluded").unwrap(),
+                PageResult::ExcludedByRobotsTxt,
+            ),
+            (
+                Url::parse("https://example.com/error").unwrap(),
+                PageResult::Error("Connection failure".to_string()),
+            ),
+        ]),
+    }
+}
+
 #[derive(Default, PartialEq, Debug, Serialize, JsonSchema)]
+#[schemars(example = "crawl_result_example")]
+/// The detailed result of crawling a domain
 pub struct CrawlResult {
     #[serde(serialize_with = "serialize_page_results")]
     #[schemars(with = "HashMap<String, PageResult>")]
+    /// One entry for each page that was reachable.
     pages: HashMap<Url, PageResult>,
 }
 
@@ -208,7 +284,7 @@ async fn step(
             crawl
                 .result
                 .pages
-                .insert(url, PageResult::ServerFailure(status, msg));
+                .insert(url, PageResult::ServerFailure { status, body: msg });
         }
         Ok(HttpResponse::Redirect(status, target)) => {
             info!("Got redirect from {} to {}", url, target);
@@ -216,10 +292,13 @@ async fn step(
             if target.domain() == url.domain() {
                 crawl.add_link(&target)?
             }
-            crawl
-                .result
-                .pages
-                .insert(url, PageResult::Redirect(status, target.clone()));
+            crawl.result.pages.insert(
+                url,
+                PageResult::Redirect {
+                    status,
+                    location: target.clone(),
+                },
+            );
         }
         Ok(HttpResponse::OtherContent(content_type)) => {
             info!("Got non html response containing: {}", content_type);
@@ -502,7 +581,13 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([(seed, PageResult::ServerFailure(status, msg.to_string())),])
+            crawl_result([(
+                seed,
+                PageResult::ServerFailure {
+                    status,
+                    body: msg.to_string()
+                }
+            ),])
         )
     }
 
@@ -564,7 +649,10 @@ mod tests {
             crawl_result([
                 (
                     redirect,
-                    PageResult::Redirect(Status::Found, Url::parse(target).unwrap())
+                    PageResult::Redirect {
+                        status: Status::Found,
+                        location: Url::parse(target).unwrap()
+                    }
                 ),
                 (
                     target,
@@ -671,7 +759,10 @@ mod tests {
             result,
             crawl_result([(
                 redirect,
-                PageResult::Redirect(Status::Found, Url::parse(target).unwrap())
+                PageResult::Redirect {
+                    status: Status::Found,
+                    location: Url::parse(target).unwrap()
+                }
             ),])
         )
     }
@@ -693,7 +784,10 @@ mod tests {
                 (seed, crawled_internal([redirect])),
                 (
                     redirect,
-                    PageResult::Redirect(Status::Found, Url::parse(seed).unwrap())
+                    PageResult::Redirect {
+                        status: Status::Found,
+                        location: Url::parse(seed).unwrap()
+                    }
                 ),
             ])
         );
@@ -724,7 +818,10 @@ mod tests {
             crawl_result([
                 (
                     redirect,
-                    PageResult::Redirect(Status::Found, Url::parse(target).unwrap())
+                    PageResult::Redirect {
+                        status: Status::Found,
+                        location: Url::parse(target).unwrap()
+                    }
                 ),
                 (target, crawled_internal([back])),
                 (back, crawled_internal([target]))

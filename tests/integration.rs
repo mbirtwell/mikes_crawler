@@ -78,7 +78,7 @@ fn relative_redirects() {
     assert_eq!(response.status(), 200);
     let body: Value = response.json().unwrap();
     assert_eq!(
-        body["pages"][start]["Redirect"][1],
+        body["pages"][start]["Redirect"]["location"],
         mock_server.url("/next")
     );
     ms.assert();
