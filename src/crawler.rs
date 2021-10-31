@@ -75,18 +75,48 @@ where
     seq.end()
 }
 
+fn url_example() -> String {
+    "http://example.com".to_string()
+}
+
+#[derive(PartialEq, Debug, Serialize, JsonSchema)]
+/// Summary of a single crawl operation progress
+pub struct CrawlStatus {
+    #[serde(serialize_with = "serialize_url")]
+    #[schemars(with = "String", example = "url_example")]
+    /// The url passed to the request
+    seed: Url,
+    /// The number of urls processed
+    done: usize,
+    /// The number of urls seen but not processed, including both those in the
+    /// queue and in being processed. This might go up before we done as we find
+    /// new urls.
+    todo: usize,
+}
+
+#[derive(PartialEq, Debug, Serialize, JsonSchema)]
+/// Summary of all crawls in progress on the server
+pub struct CrawlerStatus {
+    crawls: Vec<CrawlStatus>,
+}
+
 #[async_trait]
 pub trait Crawler {
     async fn crawl(&self, seed: Url) -> anyhow::Result<CrawlResult>;
+    async fn status(&self) -> anyhow::Result<CrawlerStatus>;
 }
 
 pub struct ProdCrawler {
     client: Box<dyn HttpClient>,
+    crawls: Mutex<HashMap<Url, Arc<Mutex<Crawl>>>>,
 }
 
 impl ProdCrawler {
     pub fn new(client: Box<dyn HttpClient>) -> Self {
-        ProdCrawler { client }
+        ProdCrawler {
+            client,
+            crawls: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -140,7 +170,7 @@ impl Crawl {
 /// locks across await. So that's fine. But the PoisonError isn't Send so we
 /// convert that in to a generic error early so that we don't have to worry a
 /// about it.
-fn lock_map_err<T>(lock: &Arc<Mutex<T>>) -> anyhow::Result<MutexGuard<'_, T>> {
+fn lock_map_err<T>(lock: &Mutex<T>) -> anyhow::Result<MutexGuard<'_, T>> {
     lock.lock().map_err(|e| anyhow!(e.to_string()))
 }
 
@@ -211,29 +241,57 @@ async fn step(
     Ok(())
 }
 
+impl ProdCrawler {
+    async fn crawl_inner(
+        &self,
+        rx: UnboundedReceiver<Url>,
+        crawl: Arc<Mutex<Crawl>>,
+    ) -> anyhow::Result<()> {
+        let mut stream = UnboundedReceiverStream::new(rx)
+            .map(|url| step(crawl.clone(), self.client.clone(), url))
+            .buffer_unordered(20);
+        while let Some(()) = stream.try_next().await? {
+            let crawl = lock_map_err(&crawl)?;
+            if crawl.result.pages.len() == crawl.seen.len() {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl Crawler for ProdCrawler {
     async fn crawl(&self, seed: Url) -> anyhow::Result<CrawlResult> {
         let robots = self.client.get_robots(seed.join("/robots.txt")?).await?;
         let (rx, crawl) = Crawl::new(robots);
         lock_map_err(&crawl)?.add_link(&seed)?;
-        {
-            let crawl2 = crawl.clone();
-            let mut stream = UnboundedReceiverStream::new(rx)
-                .map(|url| step(crawl2.clone(), self.client.clone(), url))
-                .buffer_unordered(20);
-            while let Some(()) = stream.try_next().await? {
-                let crawl = lock_map_err(&crawl)?;
-                if crawl.result.pages.len() == crawl.seen.len() {
-                    break;
-                }
-            }
-        }
+        lock_map_err(&self.crawls)?.insert(seed.clone(), crawl.clone());
+        let result = self.crawl_inner(rx, crawl.clone()).await;
+        lock_map_err(&self.crawls)?.remove(&seed);
+        // Propagate errors from crawl_inner after removing the crawl from the
+        // list of active crawls
+        result?;
 
         Ok(Arc::try_unwrap(crawl)
             .map_err(|_| anyhow!("Extra references to crawl still remain"))?
             .into_inner()?
             .result)
+    }
+
+    async fn status(&self) -> anyhow::Result<CrawlerStatus> {
+        let crawls = lock_map_err(&self.crawls)?
+            .iter()
+            .map(|(url, crawl)| {
+                let crawl = lock_map_err(crawl)?;
+                Ok(CrawlStatus {
+                    seed: url.clone(),
+                    done: crawl.result.pages.len(),
+                    todo: crawl.seen.len() - crawl.result.pages.len(),
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(CrawlerStatus { crawls })
     }
 }
 
@@ -251,11 +309,14 @@ mod tests {
     use rocket::tokio;
     use url::Url;
 
-    use crate::crawler::{CrawlResult, Crawler, PageResult, ProdCrawler};
+    use crate::crawler::{
+        CrawlResult, CrawlStatus, Crawler, CrawlerStatus, PageResult, ProdCrawler,
+    };
     use crate::http_client::{HttpClient, HttpResponse};
     use crate::link_extractor::PageInfo;
     use crate::setup_logging;
     use crate::test_util::PageInfoBuilder;
+    use rocket::tokio::sync::{Barrier, Semaphore};
 
     static INIT: Once = Once::new();
 
@@ -274,6 +335,8 @@ mod tests {
     struct DummyResponse {
         respond: Box<dyn Fn() -> Result<HttpResponse, anyhow::Error> + Send + Sync>,
         hit_count: u32,
+        stop: Option<Arc<Barrier>>,
+        restart: Option<Arc<Semaphore>>,
     }
 
     impl DummyResponse {
@@ -283,6 +346,21 @@ mod tests {
             DummyResponse {
                 respond: Box::new(respond),
                 hit_count: 0,
+                stop: None,
+                restart: None,
+            }
+        }
+
+        fn with_restart(
+            respond: impl Fn() -> Result<HttpResponse, anyhow::Error> + Send + Sync + 'static,
+            stop: Arc<Barrier>,
+            restart: Arc<Semaphore>,
+        ) -> Self {
+            DummyResponse {
+                respond: Box::new(respond),
+                hit_count: 0,
+                stop: Some(stop),
+                restart: Some(restart),
             }
         }
     }
@@ -352,12 +430,25 @@ mod tests {
     #[async_trait]
     impl HttpClient for DummyHttpClient {
         async fn get(&self, url: Url) -> Result<HttpResponse, anyhow::Error> {
-            let mut responses = self.responses.lock().unwrap();
-            let response = responses
-                .get_mut(&url)
-                .unwrap_or_else(|| panic!("No response available for url {}", url));
-            response.hit_count += 1;
-            (response.respond)()
+            let (response, stop, restart) = {
+                let mut responses = self.responses.lock().unwrap();
+                let response = responses
+                    .get_mut(&url)
+                    .unwrap_or_else(|| panic!("No response available for url {}", url));
+                response.hit_count += 1;
+                (
+                    (response.respond)(),
+                    response.stop.clone(),
+                    response.restart.clone(),
+                )
+            };
+            if let Some(stop) = stop {
+                stop.wait().await;
+            }
+            if let Some(restart) = restart {
+                restart.acquire().await.unwrap().forget();
+            }
+            response
         }
 
         async fn get_robots(&self, _url: Url) -> Result<Option<String>, Error> {
@@ -714,5 +805,124 @@ mod tests {
             ])
         );
         assert_eq!(dummy_client.get_hit_counts()[excluded], 0);
+    }
+
+    #[tokio::test]
+    async fn get_some_status() {
+        setup();
+        let mut dummy_client = DummyHttpClient::default();
+        let start = "https://example.com/start";
+        let page1 = "https://example.com/page1";
+        let page2 = "https://example.com/page2";
+
+        let stop = Arc::new(Barrier::new(3));
+        let restart = Arc::new(Semaphore::new(0));
+
+        dummy_client.add_page(start, html_with_links([page1, page2]));
+        dummy_client.insert(
+            page1,
+            DummyResponse::with_restart(
+                move || Ok(HttpResponse::Html("".to_string())),
+                stop.clone(),
+                restart.clone(),
+            ),
+        );
+        dummy_client.insert(
+            page2,
+            DummyResponse::with_restart(
+                move || Ok(HttpResponse::Html("".to_string())),
+                stop.clone(),
+                restart.clone(),
+            ),
+        );
+
+        let crawler = Arc::new(ProdCrawler::new(HttpClient::clone(&dummy_client)));
+        let crawler2 = crawler.clone();
+        let crawl = tokio::spawn(async move { crawler.crawl(Url::parse(start).unwrap()).await });
+
+        stop.wait().await;
+
+        let status = crawler2.status().await.unwrap();
+
+        restart.add_permits(2);
+
+        assert_eq!(
+            status,
+            CrawlerStatus {
+                crawls: vec![CrawlStatus {
+                    seed: Url::parse(start).unwrap(),
+                    done: 1,
+                    todo: 2
+                }]
+            }
+        );
+
+        crawl.await.unwrap().unwrap();
+
+        let status = crawler2.status().await.unwrap();
+
+        assert_eq!(status, CrawlerStatus { crawls: vec![] });
+    }
+
+    #[tokio::test]
+    async fn crawl_tracking_is_removed_if_theres_an_error() {
+        setup();
+        let mut dummy_client = DummyHttpClient::default();
+        let start = "https://example.com/start";
+        let page1 = "https://example.com/page1";
+        let page2 = "https://example.com/page2";
+
+        let stop = Arc::new(Barrier::new(3));
+        let restart = Arc::new(Semaphore::new(0));
+
+        dummy_client.add_page(start, html_with_links([page1, page2]));
+        dummy_client.insert(
+            page1,
+            DummyResponse::with_restart(
+                move || Ok(HttpResponse::Html("".to_string())),
+                stop.clone(),
+                restart.clone(),
+            ),
+        );
+        dummy_client.insert(
+            page2,
+            DummyResponse::with_restart(
+                move || Ok(HttpResponse::Html("".to_string())),
+                stop.clone(),
+                restart.clone(),
+            ),
+        );
+
+        let crawler = Arc::new(ProdCrawler::new(HttpClient::clone(&dummy_client)));
+        let crawler2 = crawler.clone();
+        let crawler3 = crawler.clone();
+        let crawl = tokio::spawn(async move { crawler.crawl(Url::parse(start).unwrap()).await });
+
+        stop.wait().await;
+
+        std::thread::spawn(move || {
+            let crawl = crawler3
+                .crawls
+                .lock()
+                .unwrap()
+                .get(&Url::parse(start).unwrap())
+                .unwrap()
+                .clone();
+            let _lock = crawl.lock().unwrap();
+            panic!("Test panic to poison mutex");
+        })
+        .join()
+        .expect_err("Expect panic thread to end in err");
+
+        restart.add_permits(2);
+
+        crawl
+            .await
+            .unwrap()
+            .expect_err("Expected crawl to end in err");
+
+        let status = crawler2.status().await.unwrap();
+
+        assert_eq!(status, CrawlerStatus { crawls: vec![] });
     }
 }
