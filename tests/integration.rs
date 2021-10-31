@@ -120,7 +120,7 @@ fn ignores_things_excluded_by_robots() {
     setup();
 
     let mock_server = MockServer::start();
-    let mstart = mock_server.mock(|when, then| {
+    let _mstart = mock_server.mock(|when, then| {
         when.path("/start");
         then.status(200)
             .header("Content-Type", "text/html")

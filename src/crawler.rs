@@ -379,13 +379,13 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::Once;
 
     use anyhow::{anyhow, Error};
     use indoc::indoc;
     use rocket::async_trait;
     use rocket::http::Status;
     use rocket::tokio;
+    use rocket::tokio::sync::{Barrier, Semaphore};
     use url::Url;
 
     use crate::crawler::{
@@ -393,17 +393,8 @@ mod tests {
     };
     use crate::http_client::{HttpClient, HttpResponse};
     use crate::link_extractor::PageInfo;
-    use crate::setup_logging;
+    use crate::test_util;
     use crate::test_util::PageInfoBuilder;
-    use rocket::tokio::sync::{Barrier, Semaphore};
-
-    static INIT: Once = Once::new();
-
-    fn setup() {
-        INIT.call_once(|| {
-            Box::leak(Box::new(setup_logging()));
-        })
-    }
 
     fn crawl_result<const N: usize>(pages: [(&str, PageResult); N]) -> CrawlResult {
         CrawlResult {
@@ -570,7 +561,7 @@ mod tests {
 
     #[tokio::test]
     async fn reports_single_server_error() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let status = Status::InternalServerError;
         let msg = "Internal server error";
@@ -593,7 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn reports_single_network_error() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let msg = "Connection failed";
         let seed = "https://example.com/start";
@@ -609,7 +600,7 @@ mod tests {
 
     #[tokio::test]
     async fn reports_single_page_with_external_links() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let seed = "https://example.com/start";
         let external_link = "https://notexample.com/another";
@@ -633,7 +624,7 @@ mod tests {
 
     #[tokio::test]
     async fn reports_redirect_and_target() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let redirect = "https://example.com/redirect";
         let target = "https://example.com/target";
@@ -668,7 +659,7 @@ mod tests {
 
     #[tokio::test]
     async fn follows_multiple_internal_links() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let seed = "https://example.com/start";
         let link1 = "https://example.com/link1";
@@ -692,7 +683,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_after_loop_of_pages() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let seed = "https://example.com/start";
         let link1 = "https://example.com/link1";
@@ -716,7 +707,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_after_parallel_loop_of_pages() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let seed = "https://example.com/start";
         let link1 = "https://example.com/link1";
@@ -747,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn dont_follow_external_redirects() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let redirect = "https://example.com/redirect";
         let target = "https://notexample.com/target";
@@ -769,7 +760,7 @@ mod tests {
 
     #[tokio::test]
     async fn dont_revisit_due_to_redirect() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let seed = "https://example.com/start";
         let redirect = "https://example.com/redirect";
@@ -802,7 +793,7 @@ mod tests {
 
     #[tokio::test]
     async fn dont_revisit_if_found_from_redirect() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let redirect = "https://example.com/redirect";
         let target = "https://example.com/target";
@@ -838,7 +829,7 @@ mod tests {
 
     #[tokio::test]
     async fn dont_visit_fragments_separately() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let page = "https://example.com/page";
         let link1 = format!("{}#link1", page);
@@ -862,7 +853,7 @@ mod tests {
 
     #[tokio::test]
     async fn ignores_non_html() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let pdf = "https://example.com/thing.pdf";
         let content_type = "x-application/pdf";
@@ -878,7 +869,7 @@ mod tests {
 
     #[tokio::test]
     async fn ignores_link_to_page_excluded_by_robots_txt() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let page = "https://example.com/page";
         let excluded = "https://example.com/excluded";
@@ -906,7 +897,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_some_status() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let start = "https://example.com/start";
         let page1 = "https://example.com/page1";
@@ -963,7 +954,7 @@ mod tests {
 
     #[tokio::test]
     async fn crawl_tracking_is_removed_if_theres_an_error() {
-        setup();
+        test_util::leak_setup_logging();
         let mut dummy_client = DummyHttpClient::default();
         let start = "https://example.com/start";
         let page1 = "https://example.com/page1";
@@ -1023,3 +1014,5 @@ mod tests {
         assert_eq!(status, CrawlerStatus { crawls: vec![] });
     }
 }
+
+pub type CrawlerState = Box<dyn Crawler + Send + Sync>;

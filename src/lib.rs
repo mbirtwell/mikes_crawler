@@ -2,67 +2,23 @@
 
 use std::io::stdout;
 
-use rocket::http::Status;
-use rocket::serde::json::Json;
-use rocket::{get, State};
+use rocket_okapi::openapi_get_routes;
 use rocket_okapi::swagger_ui::{make_swagger_ui, SwaggerUIConfig};
-use rocket_okapi::{openapi, openapi_get_routes};
 use slog::{o, Drain};
-use url::Url;
-
-use crate::better_logging::{log_filter, print_msg_header, BetterLogging, ReqLogger};
-use crate::crawler::{CrawlResult, Crawler, CrawlerStatus, ProdCrawler};
-use crate::http_client::ProdHttpClient;
 use slog_scope::GlobalLoggerGuard;
 
+use crate::api::*;
+use crate::better_logging::{log_filter, print_msg_header, BetterLogging};
+use crate::crawler::{CrawlerState, ProdCrawler};
+use crate::http_client::ProdHttpClient;
+
+mod api;
 mod better_logging;
 mod crawler;
 mod http_client;
 mod link_extractor;
 #[cfg(test)]
 mod test_util;
-
-type CrawlerState = Box<dyn Crawler + Send + Sync>;
-
-#[openapi]
-#[get("/crawl/<seed>")]
-/// Crawl a domain starting with <seed>
-///
-/// Returns information about all the links on every page reachable from seed
-async fn crawl(
-    logger: ReqLogger,
-    crawler: &State<CrawlerState>,
-    seed: String,
-) -> Result<Json<CrawlResult>, (Status, String)> {
-    logger
-        .scope(async move {
-            let seed = Url::parse(&seed).map_err(|e| (Status::BadRequest, e.to_string()))?;
-            let result = crawler
-                .crawl(seed)
-                .await
-                .map_err(|e| (Status::InternalServerError, e.to_string()))?;
-            Ok(Json(result))
-        })
-        .await
-}
-
-#[openapi]
-#[get("/status")]
-/// Get a summary of all the crawl operations in progress on the server
-async fn status(
-    logger: ReqLogger,
-    crawler: &State<CrawlerState>,
-) -> Result<Json<CrawlerStatus>, (Status, String)> {
-    logger
-        .scope(async move {
-            let result = crawler
-                .status()
-                .await
-                .map_err(|e| (Status::InternalServerError, e.to_string()))?;
-            Ok(Json(result))
-        })
-        .await
-}
 
 pub fn setup_logging() -> GlobalLoggerGuard {
     let plain = slog_term::PlainSyncDecorator::new(stdout());
