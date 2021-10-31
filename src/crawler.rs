@@ -296,7 +296,7 @@ async fn step(
                 url,
                 PageResult::Redirect {
                     status,
-                    location: target.clone(),
+                    location: target,
                 },
             );
         }

@@ -22,6 +22,7 @@ pub struct PageInfo {
     pub external_links: Vec<Url>,
 }
 
+#[allow(clippy::ptr_arg)]
 fn serialize_vec_url<S>(data: &Vec<Url>, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
@@ -44,7 +45,7 @@ impl<'a> PageInfoSink<'a> {
             .attrs
             .iter()
             .find(|a| &a.name.local == "href")
-            .ok_or(anyhow!("No href"))?;
+            .ok_or_else(|| anyhow!("No href"))?;
         let url = self.url.join(&href.value)?;
         if url.domain() == self.url.domain() {
             self.output.internal_links.push(url);

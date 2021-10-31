@@ -58,13 +58,13 @@ impl Fairing for BetterLogging {
     }
 
     async fn on_response<'r>(&self, req: &'r Request<'_>, res: &mut Response<'r>) {
-        let logger = req.local_cache(|| ReqLogger::backup());
+        let logger = req.local_cache(ReqLogger::backup);
         let request_id = req.local_cache(|| RequestId("missing".to_string()));
         res.set_raw_header("X-REQ-ID", request_id.0.clone());
         let time_str = req
             .local_cache(|| TimerStart(None))
             .0
-            .ok_or(anyhow!("Start time not set"))
+            .ok_or_else(|| anyhow!("Start time not set"))
             .and_then(|t| Ok(t.elapsed()?))
             .map(|d| format!("{}.{:03}s", d.as_secs(), d.subsec_millis()))
             .unwrap_or_else(|e| e.to_string());
@@ -103,7 +103,7 @@ impl<'r> FromRequest<'r> for ReqLogger {
     type Error = ();
 
     async fn from_request(request: &'r Request<'_>) -> request::Outcome<Self, ()> {
-        request::Outcome::Success(request.local_cache(|| ReqLogger::backup()).clone())
+        request::Outcome::Success(request.local_cache(ReqLogger::backup).clone())
     }
 }
 

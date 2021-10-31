@@ -62,7 +62,7 @@ impl HttpClient for ProdHttpClient {
             let location = response
                 .headers()
                 .get("Location")
-                .ok_or(anyhow!("No Location header on redirect"))?;
+                .ok_or_else(|| anyhow!("No Location header on redirect"))?;
             let location = url.join(location.to_str()?)?;
             Ok(HttpResponse::Redirect(
                 Status::new(response.status().as_u16()),
