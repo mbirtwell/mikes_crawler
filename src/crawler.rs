@@ -18,7 +18,7 @@ use crate::http_client::{HttpClient, HttpResponse, USER_AGENT};
 use crate::link_extractor::{parse_page, PageInfo};
 
 #[derive(Debug, PartialEq, Serialize, JsonSchema)]
-enum PageResult {
+pub enum PageResult {
     #[schemars(title = "Server failure")]
     /// The remote server returned something other than success
     ///
@@ -134,7 +134,7 @@ pub struct CrawlResult {
     #[serde(serialize_with = "serialize_page_results")]
     #[schemars(with = "HashMap<String, PageResult>")]
     /// One entry for each page that was reachable.
-    pages: HashMap<Url, PageResult>,
+    pub(crate) pages: HashMap<Url, PageResult>,
 }
 
 fn serialize_page_results<S>(
@@ -161,19 +161,19 @@ pub struct CrawlStatus {
     #[serde(serialize_with = "serialize_url")]
     #[schemars(with = "String", example = "url_example")]
     /// The url passed to the request
-    seed: Url,
+    pub(crate) seed: Url,
     /// The number of urls processed
-    done: usize,
+    pub(crate) done: usize,
     /// The number of urls seen but not processed, including both those in the
     /// queue and in being processed. This might go up before we done as we find
     /// new urls.
-    todo: usize,
+    pub(crate) todo: usize,
 }
 
 #[derive(PartialEq, Debug, Serialize, JsonSchema)]
 /// Summary of all crawls in progress on the server
 pub struct CrawlerStatus {
-    crawls: Vec<CrawlStatus>,
+    pub(crate) crawls: Vec<CrawlStatus>,
 }
 
 #[async_trait]
@@ -396,12 +396,6 @@ mod tests {
     use crate::test_util;
     use crate::test_util::PageInfoBuilder;
 
-    fn crawl_result<const N: usize>(pages: [(&str, PageResult); N]) -> CrawlResult {
-        CrawlResult {
-            pages: HashMap::from(pages.map(|(url, result)| (Url::parse(url).unwrap(), result))),
-        }
-    }
-
     struct DummyResponse {
         respond: Box<dyn Fn() -> Result<HttpResponse, anyhow::Error> + Send + Sync>,
         hit_count: u32,
@@ -555,10 +549,6 @@ mod tests {
         )
     }
 
-    fn crawled_internal<const N: usize>(links: [&str; N]) -> PageResult {
-        PageResult::Crawled(PageInfoBuilder::new().internal_links(links).build())
-    }
-
     #[tokio::test]
     async fn reports_single_server_error() {
         test_util::leak_setup_logging();
@@ -572,7 +562,7 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([(
+            test_util::crawl_result([(
                 seed,
                 PageResult::ServerFailure {
                     status,
@@ -594,7 +584,7 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([(seed, PageResult::Error(msg.to_string()),)])
+            test_util::crawl_result([(seed, PageResult::Error(msg.to_string()),)])
         )
     }
 
@@ -611,7 +601,7 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([(
+            test_util::crawl_result([(
                 seed,
                 PageResult::Crawled(
                     PageInfoBuilder::new()
@@ -637,7 +627,7 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([
+            test_util::crawl_result([
                 (
                     redirect,
                     PageResult::Redirect {
@@ -673,8 +663,8 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([
-                (seed, crawled_internal([link1, link2]),),
+            test_util::crawl_result([
+                (seed, test_util::crawled_internal([link1, link2]),),
                 (link1, PageResult::Crawled(PageInfo::default()),),
                 (link2, PageResult::Crawled(PageInfo::default()),)
             ])
@@ -697,10 +687,10 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([
-                (seed, crawled_internal([link1])),
-                (link1, crawled_internal([link2])),
-                (link2, crawled_internal([seed]))
+            test_util::crawl_result([
+                (seed, test_util::crawled_internal([link1])),
+                (link1, test_util::crawled_internal([link2])),
+                (link2, test_util::crawled_internal([seed]))
             ])
         )
     }
@@ -721,10 +711,10 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([
-                (seed, crawled_internal([link1, link2])),
-                (link1, crawled_internal([seed, link2])),
-                (link2, crawled_internal([seed, link1]))
+            test_util::crawl_result([
+                (seed, test_util::crawled_internal([link1, link2])),
+                (link1, test_util::crawled_internal([seed, link2])),
+                (link2, test_util::crawled_internal([seed, link1]))
             ])
         );
         assert_eq!(
@@ -748,7 +738,7 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([(
+            test_util::crawl_result([(
                 redirect,
                 PageResult::Redirect {
                     status: Status::Found,
@@ -771,8 +761,8 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([
-                (seed, crawled_internal([redirect])),
+            test_util::crawl_result([
+                (seed, test_util::crawled_internal([redirect])),
                 (
                     redirect,
                     PageResult::Redirect {
@@ -806,7 +796,7 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([
+            test_util::crawl_result([
                 (
                     redirect,
                     PageResult::Redirect {
@@ -814,8 +804,8 @@ mod tests {
                         location: Url::parse(target).unwrap()
                     }
                 ),
-                (target, crawled_internal([back])),
-                (back, crawled_internal([target]))
+                (target, test_util::crawled_internal([back])),
+                (back, test_util::crawled_internal([target]))
             ])
         );
         assert_eq!(
@@ -840,7 +830,7 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([(page, crawled_internal([&link1, &link2])),])
+            test_util::crawl_result([(page, test_util::crawled_internal([&link1, &link2])),])
         );
         assert_eq!(
             dummy_client
@@ -863,7 +853,7 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([(pdf, PageResult::OtherContent(content_type.to_string())),])
+            test_util::crawl_result([(pdf, PageResult::OtherContent(content_type.to_string())),])
         );
     }
 
@@ -887,8 +877,8 @@ mod tests {
 
         assert_eq!(
             result,
-            crawl_result([
-                (page, crawled_internal([excluded])),
+            test_util::crawl_result([
+                (page, test_util::crawled_internal([excluded])),
                 (excluded, PageResult::ExcludedByRobotsTxt)
             ])
         );

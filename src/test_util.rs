@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::sync::Once;
 
 use url::Url;
 
+use crate::crawler::{CrawlResult, PageResult};
 use crate::link_extractor::PageInfo;
 use crate::setup_logging;
 
@@ -37,4 +39,14 @@ pub fn leak_setup_logging() {
     INIT.call_once(|| {
         Box::leak(Box::new(setup_logging()));
     })
+}
+
+pub fn crawl_result<const N: usize>(pages: [(&str, PageResult); N]) -> CrawlResult {
+    CrawlResult {
+        pages: HashMap::from(pages.map(|(url, result)| (Url::parse(url).unwrap(), result))),
+    }
+}
+
+pub fn crawled_internal<const N: usize>(links: [&str; N]) -> PageResult {
+    PageResult::Crawled(PageInfoBuilder::new().internal_links(links).build())
 }
