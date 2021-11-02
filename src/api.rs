@@ -1,12 +1,15 @@
 use reqwest::Url;
 use rocket::http::Status;
 use rocket::serde::json::Json;
+use rocket::serde::Serialize;
 use rocket::{get, State};
 use rocket_okapi::openapi;
+use schemars::JsonSchema;
 
 use crate::better_logging::ReqLogger;
 use crate::crawler::CrawlerState;
 use crate::crawler::{CrawlResult, CrawlerStatus};
+use crate::serializers::serialize_vec_url;
 
 #[openapi]
 #[get("/crawl/<seed>")]
@@ -26,6 +29,38 @@ pub async fn crawl(
                 .await
                 .map_err(|e| (Status::InternalServerError, e.to_string()))?;
             Ok(Json(result))
+        })
+        .await
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct CrawlList {
+    #[serde(serialize_with = "serialize_vec_url")]
+    #[schemars(with = "Vec<String>")]
+    /// Links found with the same domain as the seed
+    pages: Vec<Url>,
+}
+
+#[openapi]
+#[get("/crawl/<seed>/list")]
+/// List a domain starting with <seed>
+///
+/// Returns a list of all the urls that can be found on a domain starting with
+/// seed.
+pub async fn list(
+    logger: ReqLogger,
+    crawler: &State<CrawlerState>,
+    seed: String,
+) -> Result<Json<CrawlList>, (Status, String)> {
+    logger
+        .scope(async move {
+            let seed = Url::parse(&seed).map_err(|e| (Status::BadRequest, e.to_string()))?;
+            let crawl = crawler
+                .crawl(seed)
+                .await
+                .map_err(|e| (Status::InternalServerError, e.to_string()))?;
+            let pages = crawl.pages.into_keys().collect::<Vec<_>>();
+            Ok(Json(CrawlList { pages }))
         })
         .await
 }
@@ -100,12 +135,16 @@ mod tests {
         format!("/crawl/{}", urlencoding::encode(data))
     }
 
+    fn list_url(data: &str) -> String {
+        format!("/crawl/{}/list", urlencoding::encode(data))
+    }
+
     fn build_client(crawler: DummyCrawler) -> Client {
         leak_setup_logging();
         let rocket = rocket::build()
             .attach(BetterLogging {})
             .manage(CrawlerState::from(Box::new(crawler)))
-            .mount("/", routes![crawl, status]);
+            .mount("/", routes![crawl, list, status]);
         Client::tracked(rocket).unwrap()
     }
 
@@ -179,5 +218,32 @@ mod tests {
         let json: Value = response.into_json().unwrap();
         println!("{:?}", json);
         assert_eq!(json["crawls"][0]["seed"], url);
+    }
+
+    #[test]
+    fn list_returns_all_visited_urls() {
+        let url = "https://example.com/";
+        let url2 = "https://example.com/2";
+        let url3 = "https://example.com/3";
+        let client = build_client(DummyCrawler::with_crawl(move || {
+            Ok(crawl_result([
+                (url, crawled_internal([url2, url3])),
+                (url2, crawled_internal([])),
+                (url3, crawled_internal([])),
+            ]))
+        }));
+
+        let response = client.get(list_url(url)).dispatch();
+
+        assert_eq!(response.status(), Status::Ok);
+        let json: Value = response.into_json().unwrap();
+        let mut pages = json["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>();
+        pages.sort_unstable();
+        assert_eq!(pages, vec![url, url2, url3]);
     }
 }

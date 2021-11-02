@@ -16,6 +16,7 @@ use url::Url;
 
 use crate::http_client::{HttpClient, HttpResponse, USER_AGENT};
 use crate::link_extractor::{parse_page, PageInfo};
+use crate::serializers::{serialize_status, serialize_url};
 
 #[derive(Debug, PartialEq, Serialize, JsonSchema)]
 pub enum PageResult {
@@ -66,20 +67,6 @@ pub enum PageResult {
     /// The server had a robots.txt file that asked robots not to visit this
     /// url. So we didn't.
     ExcludedByRobotsTxt,
-}
-
-fn serialize_status<S>(data: &Status, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    serializer.serialize_u16(data.code)
-}
-
-fn serialize_url<S>(data: &Url, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    serializer.serialize_str(data.as_str())
 }
 
 fn crawl_result_example() -> CrawlResult {

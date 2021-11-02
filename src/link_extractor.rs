@@ -4,11 +4,12 @@ use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
     TokenizerResult,
 };
-use rocket::serde::ser::SerializeSeq;
-use rocket::serde::{Serialize, Serializer};
+use rocket::serde::Serialize;
 use schemars::JsonSchema;
 use slog_scope::info;
 use url::Url;
+
+use crate::serializers::serialize_vec_url;
 
 #[derive(Clone, Default, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub struct PageInfo {
@@ -20,18 +21,6 @@ pub struct PageInfo {
     #[schemars(with = "Vec<String>")]
     /// Links found on the page with different domains to the page
     pub external_links: Vec<Url>,
-}
-
-#[allow(clippy::ptr_arg)]
-fn serialize_vec_url<S>(data: &Vec<Url>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let mut seq = serializer.serialize_seq(Some(data.len()))?;
-    for url in data {
-        seq.serialize_element(url.as_str())?;
-    }
-    seq.end()
 }
 
 struct PageInfoSink<'a> {

@@ -17,6 +17,7 @@ mod better_logging;
 mod crawler;
 mod http_client;
 mod link_extractor;
+mod serializers;
 #[cfg(test)]
 mod test_util;
 
@@ -41,7 +42,7 @@ pub async fn run_server() {
         .manage(CrawlerState::from(Box::new(ProdCrawler::new(Box::new(
             ProdHttpClient::new(),
         )))))
-        .mount("/", openapi_get_routes![crawl, status])
+        .mount("/", openapi_get_routes![crawl, list, status])
         .mount(
             "/swagger",
             make_swagger_ui(&SwaggerUIConfig {
