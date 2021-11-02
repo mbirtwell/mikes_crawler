@@ -1,15 +1,111 @@
-use reqwest::Url;
 use rocket::http::Status;
+use rocket::request::FromParam;
+use rocket::response::Responder;
 use rocket::serde::json::Json;
+use rocket::serde::json::Value;
 use rocket::serde::Serialize;
-use rocket::{get, State};
+use rocket::{get, Request, State};
 use rocket_okapi::openapi;
 use schemars::JsonSchema;
+use url::Url;
 
 use crate::better_logging::ReqLogger;
 use crate::crawler::CrawlerState;
 use crate::crawler::{CrawlResult, CrawlerStatus};
 use crate::serializers::serialize_vec_url;
+use anyhow::Error;
+use rocket_okapi::gen::OpenApiGenerator;
+use rocket_okapi::okapi::openapi3::{MediaType, Responses};
+use rocket_okapi::okapi::schemars::gen::SchemaGenerator;
+use rocket_okapi::okapi::schemars::schema::Schema;
+use rocket_okapi::response::OpenApiResponderInner;
+use rocket_okapi::util::add_content_response;
+
+// SeedUrl isn't transferred as JSON but okapi insists on having a JSON schema
+// for it. So we provide a trivial, but representative schema.
+pub struct SeedUrl {
+    url: Url,
+}
+
+impl JsonSchema for SeedUrl {
+    fn schema_name() -> String {
+        "SeedUrl".to_string()
+    }
+
+    fn json_schema(gen: &mut SchemaGenerator) -> Schema {
+        String::json_schema(gen)
+    }
+}
+
+impl FromParam<'_> for SeedUrl {
+    type Error = ApiError;
+
+    fn from_param(param: &str) -> Result<Self, Self::Error> {
+        match Url::parse(param) {
+            Ok(url) => Ok(SeedUrl { url }),
+            Err(err) => Err(ApiError::BadSeed(err)),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ApiError {
+    BadSeed(url::ParseError),
+    InternalError(anyhow::Error),
+}
+
+// ApiError isn't transferred as JSON but okapi insists on having a JSON schema
+// for it. So we provide a trivial, but representative schema.
+impl JsonSchema for ApiError {
+    fn schema_name() -> String {
+        "ApiError".to_string()
+    }
+
+    fn json_schema(gen: &mut SchemaGenerator) -> Schema {
+        String::json_schema(gen)
+    }
+}
+
+impl OpenApiResponderInner for ApiError {
+    fn responses(_gen: &mut OpenApiGenerator) -> rocket_okapi::Result<Responses> {
+        let mut responses = Responses::default();
+        add_content_response(
+            &mut responses,
+            400,
+            "text/plain",
+            MediaType {
+                example: Some(Value::String("Bad seed url".to_string())),
+                ..MediaType::default()
+            },
+        )?;
+        add_content_response(
+            &mut responses,
+            500,
+            "text/plain",
+            MediaType {
+                example: Some(Value::String("Internal server error".to_string())),
+                ..MediaType::default()
+            },
+        )?;
+        Ok(responses)
+    }
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(err: Error) -> Self {
+        ApiError::InternalError(err)
+    }
+}
+
+impl<'r> Responder<'r, 'static> for ApiError {
+    fn respond_to(self, request: &'r Request<'_>) -> rocket::response::Result<'static> {
+        match self {
+            ApiError::BadSeed(error) => (Status::BadRequest, error.to_string()),
+            ApiError::InternalError(error) => (Status::InternalServerError, error.to_string()),
+        }
+        .respond_to(request)
+    }
+}
 
 #[openapi]
 #[get("/crawl/<seed>")]
@@ -19,15 +115,11 @@ use crate::serializers::serialize_vec_url;
 pub async fn crawl(
     logger: ReqLogger,
     crawler: &State<CrawlerState>,
-    seed: String,
-) -> Result<Json<CrawlResult>, (Status, String)> {
+    seed: Result<SeedUrl, ApiError>,
+) -> Result<Json<CrawlResult>, ApiError> {
     logger
         .scope(async move {
-            let seed = Url::parse(&seed).map_err(|e| (Status::BadRequest, e.to_string()))?;
-            let result = crawler
-                .crawl(seed)
-                .await
-                .map_err(|e| (Status::InternalServerError, e.to_string()))?;
+            let result = crawler.crawl(seed?.url).await?;
             Ok(Json(result))
         })
         .await
@@ -50,15 +142,11 @@ pub struct CrawlList {
 pub async fn list(
     logger: ReqLogger,
     crawler: &State<CrawlerState>,
-    seed: String,
-) -> Result<Json<CrawlList>, (Status, String)> {
+    seed: Result<SeedUrl, ApiError>,
+) -> Result<Json<CrawlList>, ApiError> {
     logger
         .scope(async move {
-            let seed = Url::parse(&seed).map_err(|e| (Status::BadRequest, e.to_string()))?;
-            let crawl = crawler
-                .crawl(seed)
-                .await
-                .map_err(|e| (Status::InternalServerError, e.to_string()))?;
+            let crawl = crawler.crawl(seed?.url).await?;
             let pages = crawl.pages.into_keys().collect::<Vec<_>>();
             Ok(Json(CrawlList { pages }))
         })
@@ -71,13 +159,10 @@ pub async fn list(
 pub async fn status(
     logger: ReqLogger,
     crawler: &State<CrawlerState>,
-) -> Result<Json<CrawlerStatus>, (Status, String)> {
+) -> Result<Json<CrawlerStatus>, ApiError> {
     logger
         .scope(async move {
-            let result = crawler
-                .status()
-                .await
-                .map_err(|e| (Status::InternalServerError, e.to_string()))?;
+            let result = crawler.status().await?;
             Ok(Json(result))
         })
         .await
@@ -86,14 +171,15 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use rocket::local::blocking::Client;
+    use rocket::serde::json::Value;
     use rocket::{async_trait, routes};
     use url::Url;
 
-    use super::*;
     use crate::better_logging::BetterLogging;
     use crate::crawler::{CrawlResult, CrawlStatus, Crawler, CrawlerState, CrawlerStatus};
     use crate::test_util::{crawl_result, crawled_internal, leak_setup_logging};
-    use rocket::serde::json::Value;
+
+    use super::*;
 
     #[derive(Default)]
     struct DummyCrawler {
