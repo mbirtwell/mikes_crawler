@@ -42,7 +42,7 @@ pub async fn run_server() {
         .manage(CrawlerState::from(Box::new(ProdCrawler::new(Box::new(
             ProdHttpClient::new(),
         )))))
-        .mount("/", openapi_get_routes![crawl, list, status])
+        .mount("/", openapi_get_routes![crawl, list, count, status])
         .mount(
             "/swagger",
             make_swagger_ui(&SwaggerUIConfig {

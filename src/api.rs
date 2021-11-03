@@ -153,6 +153,30 @@ pub async fn list(
         .await
 }
 
+#[derive(Serialize, JsonSchema)]
+pub struct CrawlCount {
+    /// The count of urls that were found
+    page_count: usize,
+}
+
+#[openapi]
+#[get("/crawl/<seed>/count")]
+/// Count the urls that can be found starting at seed
+pub async fn count(
+    logger: ReqLogger,
+    crawler: &State<CrawlerState>,
+    seed: Result<SeedUrl, ApiError>,
+) -> Result<Json<CrawlCount>, ApiError> {
+    logger
+        .scope(async move {
+            let crawl = crawler.crawl(seed?.url).await?;
+            Ok(Json(CrawlCount {
+                page_count: crawl.pages.len(),
+            }))
+        })
+        .await
+}
+
 #[openapi]
 #[get("/status")]
 /// Get a summary of all the crawl operations in progress on the server
@@ -221,16 +245,12 @@ mod tests {
         format!("/crawl/{}", urlencoding::encode(data))
     }
 
-    fn list_url(data: &str) -> String {
-        format!("/crawl/{}/list", urlencoding::encode(data))
-    }
-
     fn build_client(crawler: DummyCrawler) -> Client {
         leak_setup_logging();
         let rocket = rocket::build()
             .attach(BetterLogging {})
             .manage(CrawlerState::from(Box::new(crawler)))
-            .mount("/", routes![crawl, list, status]);
+            .mount("/", routes![crawl, list, count, status]);
         Client::tracked(rocket).unwrap()
     }
 
@@ -319,7 +339,10 @@ mod tests {
             ]))
         }));
 
-        let response = client.get(list_url(url)).dispatch();
+        let data = url;
+        let response = client
+            .get(format!("/crawl/{}/list", urlencoding::encode(data)))
+            .dispatch();
 
         assert_eq!(response.status(), Status::Ok);
         let json: Value = response.into_json().unwrap();
@@ -331,5 +354,28 @@ mod tests {
             .collect::<Vec<_>>();
         pages.sort_unstable();
         assert_eq!(pages, vec![url, url2, url3]);
+    }
+
+    #[test]
+    fn count_returns_the_number_of_visited_urls() {
+        let url = "https://example.com/";
+        let url2 = "https://example.com/2";
+        let url3 = "https://example.com/3";
+        let client = build_client(DummyCrawler::with_crawl(move || {
+            Ok(crawl_result([
+                (url, crawled_internal([url2, url3])),
+                (url2, crawled_internal([])),
+                (url3, crawled_internal([])),
+            ]))
+        }));
+
+        let data = url;
+        let response = client
+            .get(format!("/crawl/{}/count", urlencoding::encode(data)))
+            .dispatch();
+
+        assert_eq!(response.status(), Status::Ok);
+        let json: Value = response.into_json().unwrap();
+        assert_eq!(json["page_count"].as_i64().unwrap(), 3);
     }
 }
