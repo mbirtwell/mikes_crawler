@@ -17,10 +17,25 @@ pub enum HttpResponse {
     ServerFailure(Status, String),
 }
 
+/// The HttpClient trait is just here to provide a level of indirection so that
+/// we can isolate the rest of the code from the network for testing. The
+/// production code that sits behind this is a thin layer over the reqwest http
+/// client and as such needs a real http server to be available to test. So that
+/// is left for the integration tests and there are no unit tests in this
+/// module.
+///
 #[async_trait]
 pub trait HttpClient: Sync + Send {
     async fn get(&self, url: Url) -> Result<HttpResponse, anyhow::Error>;
     async fn get_robots(&self, url: Url) -> Result<Option<String>, anyhow::Error>;
+
+    // We want HttpClient to be cloneable because that maps best with how
+    // reqwest::Client is intended to be user. reqwest::Client has an internal Arc.
+    // But we can't make Clone a supertrait of HttpClient, because then it's not
+    // object safe. I think that I also could have solved this by making my
+    // holder for the http client Box<dyn HttpClient + Clone> every where, but
+    // putting this inside HttpClient seems to capture that HttpClient has a
+    // single user that requires this better.
     fn clone(&self) -> Box<dyn HttpClient>;
 }
 
@@ -34,6 +49,8 @@ impl ProdHttpClient {
         ProdHttpClient {
             client: reqwest::ClientBuilder::new()
                 .user_agent(USER_AGENT)
+                // The crawler wants to handle redirects explicitly so that they
+                // can be recorded.
                 .redirect(Policy::none())
                 .build()
                 // No point trying to handle this error, we can't do anything

@@ -48,10 +48,34 @@ impl FromParam<'_> for SeedUrl {
     }
 }
 
+// Represents an error that we want to return.
+// anyhow::Error is used as a catch all and returned as an InternalError and
+// a From implementation is provided for that for convenience.
+// The one explicit error that we support at the moment is a invalid url being
+// passed as the seed. No From implementation is provided for that because it
+// should only be generated from the one place in the FromParam for SeedUrl.
+// If more error cases are added this could be derived using thiserror to cut
+// down on boiler plate.
 #[derive(Debug)]
 pub enum ApiError {
     BadSeed(url::ParseError),
     InternalError(anyhow::Error),
+}
+
+impl From<anyhow::Error> for ApiError {
+    fn from(err: Error) -> Self {
+        ApiError::InternalError(err)
+    }
+}
+
+impl<'r> Responder<'r, 'static> for ApiError {
+    fn respond_to(self, request: &'r Request<'_>) -> rocket::response::Result<'static> {
+        match self {
+            ApiError::BadSeed(error) => (Status::BadRequest, error.to_string()),
+            ApiError::InternalError(error) => (Status::InternalServerError, error.to_string()),
+        }
+        .respond_to(request)
+    }
 }
 
 // ApiError isn't transferred as JSON but okapi insists on having a JSON schema
@@ -66,6 +90,7 @@ impl JsonSchema for ApiError {
     }
 }
 
+// This tells swagger how to display information about this.
 impl OpenApiResponderInner for ApiError {
     fn responses(_gen: &mut OpenApiGenerator) -> rocket_okapi::Result<Responses> {
         let mut responses = Responses::default();
@@ -91,25 +116,9 @@ impl OpenApiResponderInner for ApiError {
     }
 }
 
-impl From<anyhow::Error> for ApiError {
-    fn from(err: Error) -> Self {
-        ApiError::InternalError(err)
-    }
-}
-
-impl<'r> Responder<'r, 'static> for ApiError {
-    fn respond_to(self, request: &'r Request<'_>) -> rocket::response::Result<'static> {
-        match self {
-            ApiError::BadSeed(error) => (Status::BadRequest, error.to_string()),
-            ApiError::InternalError(error) => (Status::InternalServerError, error.to_string()),
-        }
-        .respond_to(request)
-    }
-}
-
 #[openapi]
 #[get("/crawl/<seed>")]
-/// Crawl a domain starting with <seed>
+/// Crawl a domain starting with {seed}
 ///
 /// Returns information about all the links on every page reachable from seed
 pub async fn crawl(
@@ -135,7 +144,7 @@ pub struct CrawlList {
 
 #[openapi]
 #[get("/crawl/<seed>/list")]
-/// List a domain starting with <seed>
+/// List a domain starting with {seed}
 ///
 /// Returns a list of all the urls that can be found on a domain starting with
 /// seed.
@@ -161,7 +170,7 @@ pub struct CrawlCount {
 
 #[openapi]
 #[get("/crawl/<seed>/count")]
-/// Count the urls that can be found starting at seed
+/// Count the urls that can be found starting at {seed}
 pub async fn count(
     logger: ReqLogger,
     crawler: &State<CrawlerState>,

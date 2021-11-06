@@ -1,3 +1,12 @@
+/// This module is the heart of the crawler
+///
+/// Each crawl operation starts with a single url the seed and maintains a queue
+/// of urls that need to be visited. So that each url is only added to this
+/// queue once we also have a set of visited urls.
+///
+/// This queue is in `Crawl::todo` and in this implementation is represented as
+/// a tokio unbounded_channel. This allows for us to conveniently start multiple
+/// concurrent processing tasks using `StreamExt::buffer_unordered`.
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -69,6 +78,7 @@ pub enum PageResult {
     ExcludedByRobotsTxt,
 }
 
+// An example of each page result in a crawl result for the swagger docs.
 fn crawl_result_example() -> CrawlResult {
     CrawlResult {
         pages: HashMap::from([
@@ -163,6 +173,8 @@ pub struct CrawlerStatus {
     pub(crate) crawls: Vec<CrawlStatus>,
 }
 
+// The Crawler trait is just here to provide a level of indirection so that we
+// can isolate the api layer for testing.
 #[async_trait]
 pub trait Crawler {
     async fn crawl(&self, seed: Url) -> anyhow::Result<CrawlResult>;
@@ -171,6 +183,8 @@ pub trait Crawler {
 
 pub struct ProdCrawler {
     client: Box<dyn HttpClient>,
+    // crawls keeps references to the on going crawls so that we can check their
+    // progress and report on it in status.
     crawls: Mutex<HashMap<Url, Arc<Mutex<Crawl>>>>,
 }
 
@@ -183,8 +197,12 @@ impl ProdCrawler {
     }
 }
 
+/// Crawl represents an in progress crawl.
 struct Crawl {
+    /// seen is all the urls that we've seen in this crawl. Including done, in
+    /// the queue and being processed.
     seen: HashSet<Url>,
+    // todo is the urls waiting to be processed.
     todo: UnboundedSender<Url>,
     result: CrawlResult,
     robots: Option<String>,
@@ -237,6 +255,9 @@ fn lock_map_err<T>(lock: &Mutex<T>) -> anyhow::Result<MutexGuard<'_, T>> {
     lock.lock().map_err(|e| anyhow!(e.to_string()))
 }
 
+/// step does all the processing for one url.
+/// fetches it, if necessary parses the html, records the result and queues any
+/// new urls to be processed.
 async fn step(
     crawl: Arc<Mutex<Crawl>>,
     client: Box<dyn HttpClient>,
