@@ -136,7 +136,7 @@ async fn step(
                 body.len()
             );
             let url2 = url.clone();
-            let page_info = spawn_blocking(move || parse_page(&url2, &body)).await?;
+            let page_info = spawn_blocking(move || parse_page(&url2, &body)).await??;
             let mut crawl = lock_map_err(&crawl)?;
             for found in page_info.internal_links.iter() {
                 crawl.add_link(found)?

@@ -1,3 +1,4 @@
+/// Parse html and return the links found in anchor elements.
 use anyhow::anyhow;
 use html5ever::tokenizer::{
     BufferQueue, Tag, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
@@ -68,7 +69,18 @@ impl<'a> TokenSink for PageInfoSink<'a> {
     }
 }
 
-pub fn parse_page(url: &Url, page: &str) -> PageInfo {
+pub fn parse_page(url: &Url, page: &str) -> anyhow::Result<PageInfo> {
+    // It would be nice to pass this function the body stream rather than the
+    // buffered body to cut down on memory usage. But neither BufferQueue or
+    // Tokenizer are Send or Sync so we can't hold them across await points
+    // whilst we wait on the buffer stream. We can work around this is one of
+    // two ways:
+    //  * Package them up in some combination of Arc/Mutex then unwrap that at
+    //    the end to get the PageInfo out
+    //  * Push this off on two another thread that's running a tokio::LocalSet
+    //
+    // Neither of these seemed worth it given the cost of buffering it pretty
+    // low.
     let mut buffers = BufferQueue::new();
     buffers.push_back(page.into());
     let mut tokenizer = Tokenizer::new(
@@ -79,11 +91,12 @@ pub fn parse_page(url: &Url, page: &str) -> PageInfo {
         TokenizerOpts::default(),
     );
     let result = tokenizer.feed(&mut buffers);
-    if !buffers.is_empty() && matches!(result, TokenizerResult::Done) {
-        panic!("TODO return error");
+    if !buffers.is_empty() || !matches!(result, TokenizerResult::Done) {
+        // I don't think that this can ever happen.
+        anyhow::bail!("parse_page didn't process all of input buffer");
     }
     tokenizer.end();
-    tokenizer.sink.output
+    Ok(tokenizer.sink.output)
 }
 
 #[cfg(test)]
@@ -95,7 +108,7 @@ mod tests {
     use crate::test_util::PageInfoBuilder;
 
     fn run_parse_successfully(html: &str) -> PageInfo {
-        parse_page(&Url::parse("https://example.com/start").unwrap(), html)
+        parse_page(&Url::parse("https://example.com/start").unwrap(), html).unwrap()
     }
 
     #[test]
