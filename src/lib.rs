@@ -1,5 +1,3 @@
-#![feature(iter_order_by)]
-
 use std::io::stdout;
 
 use rocket_okapi::openapi_get_routes;
