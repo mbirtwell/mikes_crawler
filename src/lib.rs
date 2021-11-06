@@ -9,6 +9,7 @@ use crate::api::*;
 use crate::better_logging::{log_filter, print_msg_header, BetterLogging};
 use crate::crawler::{CrawlerState, ProdCrawler};
 use crate::http_client::ProdHttpClient;
+use rocket::figment::providers::Env;
 
 mod api;
 mod better_logging;
@@ -35,7 +36,9 @@ pub fn setup_logging() -> GlobalLoggerGuard {
 }
 
 pub async fn run_server() {
-    rocket::build()
+    // heroku expects the application to bind to the port supplied in PORT
+    let config = rocket::Config::figment().merge(Env::raw().only(&["PORT"]).global());
+    rocket::custom(config)
         .attach(BetterLogging {})
         .manage(CrawlerState::from(Box::new(ProdCrawler::new(Box::new(
             ProdHttpClient::new(),
